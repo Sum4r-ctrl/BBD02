@@ -4,13 +4,9 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 load_dotenv()
 
-# === CONFIG SEGURA - AGORA SOFISTICADA ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINGX_API_KEY = os.getenv("BINGX_API_KEY")
 BINGX_SECRET = os.getenv("BINGX_SECRET")
-
-if not TELEGRAM_TOKEN or not BINGX_API_KEY:
-    print("ERRO: Tokens não encontrados na Render!")
 
 bingx = ccxt.bingx({
     'apiKey': BINGX_API_KEY,
@@ -19,11 +15,10 @@ bingx = ccxt.bingx({
     'options': {'defaultType': 'spot'}
 })
 
-banca = 4.0
+banca = 3.5 # COMEÇA COM 3.5
 rodando = False
 
-# === FILTRO FIRME - TEU ORIGINAL MANTIDO ===
-def criterio_forte():
+def criterio_forte(qtd=1):
     blacklist = ["USDC", "DAI", "TUSD", "FDUSD", "BULL", "BEAR", "UP", "DOWN", "USDE"]
     try:
         tickers = bingx.fetch_tickers()
@@ -51,66 +46,65 @@ def criterio_forte():
                 rsi = 100 - (100 / (1+rs))
                 if not (55 <= rsi <= 75): continue
                 score = vol * 0.5 + (volume/1000000)*0.3 + rsi*0.2
-                candidatos.append((simbolo, score, vol, rsi))
+                candidatos.append((simbolo, score))
             except:
                 continue
         candidatos.sort(key=lambda x: x[1], reverse=True)
-        if len(candidatos) >= 2:
-            return candidatos[0][0], candidatos[1][0]
-        elif len(candidatos) == 1:
-            return candidatos[0][0], "PEPE/USDT"
+        if qtd == 1:
+            return [candidatos[0][0]] if candidatos else ["PEPE/USDT"]
         else:
-            return "PEPE/USDT", "WIF/USDT"
+            if len(candidatos) >= 2: return [candidatos[0][0], candidatos[1][0]]
+            elif len(candidatos) == 1: return [candidatos[0][0], "PEPE/USDT"]
+            else: return ["PEPE/USDT", "WIF/USDT"]
     except:
-        return "PEPE/USDT", "WIF/USDT"
+        return ["PEPE/USDT"] if qtd==1 else ["PEPE/USDT", "WIF/USDT"]
 
-# === BOT DUPLO 2:2 ===
 async def iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global rodando, banca
     rodando = True
-    await update.message.reply_text(f"🚀 BOT BBD02 LIGADO\nBanca: ${banca} (2:2)\nFiltro firme ON")
+    modo = "1 TOKEN" if banca < 4 else "2:2"
+    await update.message.reply_text(f"🚀 BOT BBD02 LIGADO\nBanca: ${banca} Modo: {modo}\nFiltro firme ON")
 
     while rodando:
         try:
-            moeda1, moeda2 = criterio_forte()
-            if moeda1 == moeda2: moeda2 = "BONK/USDT"
-            banca_par = banca / 2
-            p1 = bingx.fetch_ticker(moeda1)['last']
-            p2 = bingx.fetch_ticker(moeda2)['last']
-            qtd1 = banca_par / p1
-            qtd2 = banca_par / p2
-            bingx.create_market_buy_order(moeda1, qtd1)
-            bingx.create_market_buy_order(moeda2, qtd2)
-            await update.message.reply_text(f"📥 COMPREI 2:2\n1) {moeda1} ${banca_par:.2f}\n2) {moeda2} ${banca_par:.2f}")
-            entrada1, entrada2 = p1, p2
-            vendeu1, vendeu2 = False, False
-            lucro1, lucro2 = 0, 0
-            while rodando and (not vendeu1 or not vendeu2):
-                try:
-                    if not vendeu1:
-                        atual1 = bingx.fetch_ticker(moeda1)['last']
-                        pnl1 = (atual1 - entrada1) / entrada1
-                        if pnl1 >= 0.25 or pnl1 <= -0.12:
-                            bingx.create_market_sell_order(moeda1, qtd1)
-                            lucro1 = banca_par * pnl1
-                            vendeu1 = True
-                            await update.message.reply_text(f"{'✅' if pnl1>0 else '🛑'} {moeda1} {pnl1*100:.1f}%")
-                    if not vendeu2:
-                        atual2 = bingx.fetch_ticker(moeda2)['last']
-                        pnl2 = (atual2 - entrada2) / entrada2
-                        if pnl2 >= 0.25 or pnl2 <= -0.11:
-                            bingx.create_market_sell_order(moeda2, qtd2)
-                            lucro2 = banca_par * pnl2
-                            vendeu2 = True
-                            await update.message.reply_text(f"{'✅' if pnl2>0 else '🛑'} {moeda2} {pnl2*100:.1f}%")
-                    await asyncio.sleep(5)
-                except:
-                    await asyncio.sleep(2)
-                    continue
-            banca += lucro1 + lucro2
-            await update.message.reply_text(f"🔄 Ciclo fechado. Banca agora: ${banca:.2f}\nBuscando próximas 2...")
+            qtd_moedas = 1 if banca < 4 else 2
+            moedas = criterio_forte(qtd_moedas)
+            banca_par = banca / qtd_moedas
+
+            compras = []
+            for moeda in moedas:
+                p = bingx.fetch_ticker(moeda)['last']
+                qtd = banca_par / p
+                bingx.create_market_buy_order(moeda, qtd)
+                compras.append((moeda, p, qtd))
+                await update.message.reply_text(f"📥 COMPREI {moeda} ${banca_par:.2f}")
+                await asyncio.sleep(1)
+
+            # Monitorar vendas
+            vendas_pendentes = {m[0]: (m[1], m[2]) for m in compras}
+            lucros = {}
+
+            while rodando and vendas_pendentes:
+                for moeda in list(vendas_pendentes.keys()):
+                    try:
+                        entrada, qtd = vendas_pendentes[moeda]
+                        atual = bingx.fetch_ticker(moeda)['last']
+                        pnl = (atual - entrada) / entrada
+                        limite = 0.12 if qtd_moedas==1 else 0.12
+                        if pnl >= 0.25 or pnl <= -0.12:
+                            bingx.create_market_sell_order(moeda, qtd)
+                            lucros[moeda] = banca_par * pnl
+                            del vendas_pendentes[moeda]
+                            await update.message.reply_text(f"{'✅' if pnl>0 else '🛑'} {moeda} {pnl*100:.1f}%")
+                    except:
+                        continue
+                await asyncio.sleep(5)
+
+            banca += sum(lucros.values())
+            proximo_modo = "1 TOKEN" if banca < 4 else "2:2"
+            await update.message.reply_text(f"🔄 Ciclo fechado. Banca: ${banca:.2f}\nPróximo modo: {proximo_modo}\nBuscando...")
         except Exception as e:
-            await update.message.reply_text(f"⚠️ Erro mas vou reiniciar: {e}")
+            await update.message.reply_text(f"⚠️ Erro: {e} - reiniciando...")
             await asyncio.sleep(5)
 
 async def parar(update, context):
@@ -124,11 +118,11 @@ async def set_banca(update, context):
         banca = float(context.args[0])
         await update.message.reply_text(f"💰 Banca = ${banca}")
     except:
-        await update.message.reply_text("Use: /banca 4")
+        await update.message.reply_text("Use: /banca 3.5")
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("iniciar", iniciar))
 app.add_handler(CommandHandler("parar", parar))
 app.add_handler(CommandHandler("banca", set_banca))
-print("Bot BBD02 2:2 rodando...")
+print(f"Bot BBD02 {banca}$ pronto...")
 app.run_polling()
